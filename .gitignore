@@ -1,0 +1,15 @@
+# Sensitive / agent-private files
+MEMORY.md
+.openclaw/
+
+# Agent workspace config (local only)
+AGENTS.md
+SOUL.md
+IDENTITY.md
+USER.md
+TOOLS.md
+HEARTBEAT.md
+BOOTSTRAP.md
+
+# Reports / temp
+reports/
