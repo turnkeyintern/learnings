@@ -1,7 +1,7 @@
 # Turnkey Product Learnings
 
-> **Compiled:** 2026-02-25  
-> **Sources:** Analyzed via subagents across 5 repositories: `docs`, `sdk` (TypeScript), `go-sdk`, `rust-sdk`, `frames`  
+> **Compiled:** 2026-02-25 | **Updated:** 2026-03-02  
+> **Sources:** Analyzed via subagents across 8 repositories: `docs`, `sdk` (TypeScript), `go-sdk`, `rust-sdk`, `frames`, `python-sdk`, `swift-sdk`, `kotlin-sdk`  
 > **Purpose:** Shared onboarding guide for understanding the Turnkey platform and its developer surfaces
 
 ---
@@ -17,8 +17,11 @@
 7. [TypeScript SDK](#typescript-sdk)
 8. [Go SDK](#go-sdk)
 9. [Rust SDK](#rust-sdk)
-10. [Cross-Cutting Themes](#cross-cutting-themes)
-11. [Open Questions](#open-questions)
+10. [Python SDK](#python-sdk)
+11. [Swift SDK (iOS/macOS)](#swift-sdk-iosmacos)
+12. [Kotlin SDK (Android)](#kotlin-sdk-android)
+13. [Cross-Cutting Themes](#cross-cutting-themes)
+14. [Open Questions](#open-questions)
 
 ---
 
@@ -515,6 +518,214 @@ Strong linting stance. Comprehensive tests with `wiremock` for HTTP mocking. New
 
 ---
 
+## Python SDK
+
+*Full details in: `python-sdk-learnings.md`*
+
+### Architecture
+
+The Python SDK is a **pip monorepo** with three packages following the same patterns as the TypeScript SDK:
+
+```
+python-sdk/
+├── packages/
+│   ├── sdk-types/          # turnkey-sdk-types (7,700+ lines of Pydantic models)
+│   ├── http/               # turnkey-http (5,000+ lines auto-generated HTTP client)
+│   └── api-key-stamper/    # turnkey-api-key-stamper (~100 lines ECDSA signing)
+├── codegen/                # Custom Python scripts (not third-party generators)
+└── schema/
+    └── public_api.swagger.json
+```
+
+### Usage Pattern
+
+```python
+from turnkey_http import TurnkeyClient
+from turnkey_api_key_stamper import ApiKeyStamper, ApiKeyStamperConfig
+
+stamper = ApiKeyStamper(ApiKeyStamperConfig(
+    api_public_key="your-api-public-key",
+    api_private_key="your-api-private-key"
+))
+
+client = TurnkeyClient(
+    base_url="https://api.turnkey.com",
+    stamper=stamper,
+    organization_id="your-org-id",
+    polling_interval_ms=1000,
+    max_polling_retries=3
+)
+
+# Activity call — auto-polls and flattens result
+response = client.create_wallet(CreateWalletBody(
+    walletName="My Wallet",
+    accounts=[...]
+))
+print(response.walletId)  # Flattened from activity result
+```
+
+### Key Characteristics
+
+- **Sync only** — uses `requests` + `time.sleep()` for polling; no asyncio support
+- **Pydantic v2** — all API types are Pydantic models with alias support
+- **Activity flattening** — result fields merged into response object post-poll
+- **Stamp-then-send pattern** — `stamp_create_wallet()` returns a `SignedRequest` without sending, enabling server-side signing workflows
+- **Public key validation** — stamper derives and validates the public key from the private key at call time
+
+### ⚠️ Notable Limitations
+
+- Blocking `time.sleep()` poll breaks async frameworks (FastAPI, Starlette, Django async)
+- Default `max_polling_retries=3` is low for production use
+- No HPKE — can call the wallet export API but cannot decrypt the result
+- P-256 signing only (no secp256k1 or ED25519)
+
+---
+
+## Swift SDK (iOS/macOS)
+
+*Full details in: `swift-sdk-learnings.md`*
+
+### Architecture
+
+The Swift SDK uses **Swift Package Manager (SPM)** with a layered module design:
+
+```
+TurnkeySwift (all-in-one)
+├── TurnkeyHttp          → Generated HTTP client + activity polling
+│   └── TurnkeyTypes     → Auto-generated Codable types (~16k+ lines)
+├── TurnkeyStamper       → Request signing (API keys, passkeys, Secure Enclave)
+│   ├── TurnkeyPasskeys  → ASAuthorization wrappers (Face ID / Touch ID)
+│   ├── TurnkeyCrypto    → P-256, HPKE
+│   └── TurnkeyKeyManager → Secure Enclave + Keychain storage
+└── TurnkeyEncoding      → Hex, Base58, Base64URL
+```
+
+**Target platforms:** iOS 17+, macOS 14+, tvOS 16+, watchOS 9+, visionOS 1.0
+
+### Usage Pattern
+
+```swift
+// App startup
+TurnkeyContext.configure(TurnkeyConfig(
+    apiUrl: "https://api.turnkey.com",
+    authProxyConfigId: "your-config-id",
+    rpId: "your-domain.com",
+    organizationId: "your-org-id",
+    auth: .init(oauth: .init(appScheme: "yourapp", providers: ...))
+))
+
+// SwiftUI binding — TurnkeyContext is an @ObservableObject
+@EnvironmentObject var context: TurnkeyContext
+
+if context.authState == .authenticated {
+    DashboardView()
+} else {
+    LoginView()
+}
+
+// Auth flows (all async/await)
+try await TurnkeyContext.shared.signUpWithPasskey(anchor: anchor, ...)
+try await TurnkeyContext.shared.verifyOtp(otpId: id, otpCode: "123456")
+let sig = try await TurnkeyContext.shared.signMessage(signWith: account, message: "Hello!")
+```
+
+### Key Characteristics
+
+- **Secure Enclave** — on-device P-256 key generation; private key never leaves the TEE (device-bound)
+- **Keychain fallback** — `SecureStorageManager` for simulators and non-enclave devices
+- **Pure async/await** — no Combine publishers or completion handlers anywhere
+- **SwiftUI-native** — `@ObservableObject` + `@Published` properties for reactive bindings
+- **Extension-based** — `TurnkeyContext` split across `+Session`, `+Wallet`, `+OAuth`, `+Otp`, `+Passkey` files
+- **4 OAuth providers** — Google, Apple, Discord, X (via `ASWebAuthenticationSession`)
+- **Auth Proxy support** — backend-optional pattern via Turnkey's managed proxy
+
+### Platform-Specific Highlights
+
+| Feature | Framework Used |
+|---------|---------------|
+| Passkeys | `AuthenticationServices` (ASAuthorization) |
+| Secure Enclave | `Security` framework |
+| Biometrics | `LocalAuthentication` (Face ID / Touch ID) |
+| OAuth | `ASWebAuthenticationSession` |
+| PKCE | Built-in verifier/challenge generation |
+
+---
+
+## Kotlin SDK (Android)
+
+*Full details in: `kotlin-sdk-learnings.md`*
+
+### Architecture
+
+The Kotlin SDK uses a **multi-module Gradle monorepo** with clear separation of concerns:
+
+```
+kotlin-sdk/packages/
+├── sdk-kotlin/    → TurnkeyContext singleton (high-level, Android lifecycle-aware)
+├── http/          → Generated typed HTTP client (OkHttp + Kotlin coroutines)
+├── types/         → Generated DTOs from OpenAPI (kotlinx.serialization)
+├── stamper/       → Request signing (API keys + passkeys)
+├── passkey/       → Android Credential Manager wrappers
+├── crypto/        → P-256 key ops, HPKE, bundle encryption (Bouncy Castle)
+├── encoding/      → Hex, Base64url, secure random
+└── tools/         → Internal codegen with KotlinPoet (not published)
+```
+
+**Target:** Android (minSdk 28 / Android 9+), with JVM compatibility for lower modules.
+
+### Usage Pattern
+
+```kotlin
+// App initialization
+TurnkeyContext.init(app = this, config = TurnkeyConfig(
+    authProxyConfigId = "<config-id>",
+    organizationId = "<org-id>",
+    appScheme = "myapp",
+    authConfig = AuthConfig(rpId = "myapp.example.com", ...)
+))
+
+// Reactive state (StateFlow)
+lifecycleScope.launch {
+    TurnkeyContext.authState.collect { state ->
+        when (state) {
+            AuthState.authenticated -> showDashboard()
+            AuthState.unauthenticated -> showLogin()
+            AuthState.loading -> showSpinner()
+        }
+    }
+}
+
+// Auth + wallet ops
+TurnkeyContext.loginWithPasskey(activity = requireActivity(), rpId = "myapp.example.com")
+TurnkeyContext.loginOrSignUpWithOtp(otpId = id, otpCode = code, contact = email)
+TurnkeyContext.signMessage(signWith = address, message = "Hello, Turnkey!", addEthereumPrefix = true)
+```
+
+### Key Characteristics
+
+- **Object singleton** — `TurnkeyContext` as a Kotlin `object` (vs Swift's class singleton)
+- **StateFlow-based reactivity** — `authState`, `session`, `wallets`, `user` as `StateFlow<T>`
+- **Sealed class errors** — `TurnkeyKotlinError` hierarchy for exhaustive `when` handling
+- **CompletableDeferred init** — `awaitReady()` suspends until init completes (vs Swift's `@Published` approach)
+- **Lifecycle-aware** — uses `ProcessLifecycleOwner` to purge expired sessions/keys on foreground
+- **Credential Manager** — wraps `androidx.credentials` for passkey registration and assertion
+- **SharedPreferences key store** — current default; Android Keystore recommended for production
+- **4 OAuth providers** — Google, Apple, Discord, X (via OAuth deep-link Activity + `OAuthEvents` SharedFlow)
+
+### Key Differences vs Swift SDK
+
+| Aspect | Kotlin (Android) | Swift (iOS/macOS) |
+|--------|-----------------|-------------------|
+| Singleton pattern | `object TurnkeyContext` | `class TurnkeyContext` (NSObject) |
+| Reactivity | `StateFlow` (Kotlin Flows) | `@Published` (ObservableObject) |
+| Passkeys | Credential Manager | ASAuthorization |
+| Key storage | SharedPreferences (⚠️ consider Keystore) | Secure Enclave / Keychain |
+| Concurrency | Kotlin Coroutines | Swift async/await |
+| Init sync | `CompletableDeferred` + `awaitReady()` | Static `configure()` |
+| Facebook OAuth | ❌ Not supported | ❌ Not supported |
+
+---
+
 ## Cross-Cutting Themes
 
 These patterns appear consistently across all SDKs and repos:
@@ -539,6 +750,12 @@ All SDKs follow the same architecture: OpenAPI/protobuf-generated code for API t
 
 ### 7. No Raw Key Exposure by Design
 This is enforced at multiple levels: TEE hardware, frame isolation (same-origin policy), and SDK APIs that never surface raw key bytes to the caller.
+
+### 8. Mobile SDKs Share the TurnkeyContext Pattern
+Both the Swift (iOS) and Kotlin (Android) SDKs use a singleton `TurnkeyContext` with reactive state bindings (`@Published` / `StateFlow`), standardized `AuthState` enum, and the same auth-flow surface (passkeys, OTP, OAuth). They mirror each other closely while adapting to platform idioms. Key divergence: Swift uses Secure Enclave for hardware-bound keys; Kotlin currently uses SharedPreferences (Android Keystore recommended for production).
+
+### 9. Python is the Odd One Out in the Server Tier
+Unlike TypeScript and Rust (which have native async polling), the Python SDK blocks with `time.sleep()`. It also lacks HPKE decryption, making wallet export a half-story. Despite being a full, well-typed SDK (Pydantic v2, 100+ methods), its docs actively mislead developers — this is the single biggest documentation gap across the entire platform.
 
 ---
 
@@ -568,4 +785,4 @@ These came up across multiple repos and are worth investigating:
 
 ---
 
-*This document was compiled from analysis of `tkhq/docs`, `tkhq/sdk`, `tkhq/go-sdk`, `tkhq/rust-sdk`, and `tkhq/frames` repositories by OpenClaw subagents on 2026-02-25.*
+*Initially compiled from analysis of `tkhq/docs`, `tkhq/sdk`, `tkhq/go-sdk`, `tkhq/rust-sdk`, and `tkhq/frames` by OpenClaw subagents on 2026-02-25. Updated 2026-03-02 with `tkhq/python-sdk`, `tkhq/swift-sdk`, and `tkhq/kotlin-sdk`.*
